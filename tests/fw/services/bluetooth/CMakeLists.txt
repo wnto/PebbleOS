@@ -24,21 +24,32 @@ pbl_clar_test(test_bluetooth_persistent_storage_prf
   OVERRIDES shared_prf_storage_v3
 )
 
+set(bluetooth_persistent_storage_sources
+  src/fw/services/bluetooth/bluetooth_persistent_storage_normal.c
+  src/fw/services/settings/settings_file.c
+  src/fw/services/settings/settings_raw_iter.c
+  src/fw/services/filesystem/pfs.c
+  src/fw/services/filesystem/flash_translation.c
+  src/fw/flash_region/flash_region.c
+  src/fw/flash_region/filesystem_regions.c
+  src/fw/util/crc8.c
+  src/fw/util/legacy_checksum.c
+  src/fw/system/hexdump.c
+  tests/fakes/fake_shared_prf_storage.c
+  tests/fakes/fake_events.c
+  tests/fakes/fake_spi_flash.c
+  tests/fakes/fake_rtc.c
+)
+
 pbl_clar_test(test_bluetooth_persistent_storage
-  SOURCES
-    src/fw/services/bluetooth/bluetooth_persistent_storage_normal.c
-    src/fw/services/settings/settings_file.c
-    src/fw/services/settings/settings_raw_iter.c
-    src/fw/services/filesystem/pfs.c
-    src/fw/services/filesystem/flash_translation.c
-    src/fw/flash_region/flash_region.c
-    src/fw/flash_region/filesystem_regions.c
-    src/fw/util/crc8.c
-    src/fw/util/legacy_checksum.c
-    src/fw/system/hexdump.c
-    tests/fakes/fake_shared_prf_storage.c
-    tests/fakes/fake_events.c
-    tests/fakes/fake_spi_flash.c
-    tests/fakes/fake_rtc.c
+  SOURCES ${bluetooth_persistent_storage_sources}
+  DEFINES CONFIG_BT_MAX_BLE_PAIRINGS=1
+  OVERRIDES dummy_board bluetooth_persistent_storage_v2
+)
+
+pbl_clar_test(test_bluetooth_persistent_storage_multi
+  SOURCE test_bluetooth_persistent_storage.c
+  SOURCES ${bluetooth_persistent_storage_sources}
+  DEFINES CONFIG_BT_MAX_BLE_PAIRINGS=2
   OVERRIDES dummy_board bluetooth_persistent_storage_v2
 )
