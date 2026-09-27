@@ -23,6 +23,8 @@
 //! bt_lock() needs to be taken before accessing this variable.
 static GAPLEAdvertisingJobRef s_reconnect_advert_job;
 static bool s_is_basic_reconnection_enabled;
+//! Reconnection was requested while still connected as slave.
+static bool s_is_basic_reconnection_pending;
 static bool s_is_hrm_reconnection_enabled;
 
 typedef enum {
@@ -176,6 +178,7 @@ static void prv_set_and_evaluate(bool *val, bool new_value) {
 void gap_le_slave_reconnect_stop(void) {
   bt_lock();
   {
+    s_is_basic_reconnection_pending = false;
     prv_set_and_evaluate(&s_is_basic_reconnection_enabled, false);
   }
   bt_unlock();
@@ -193,20 +196,35 @@ void gap_le_slave_reconnect_start(void) {
       goto unlock;
     }
 
-    if (gap_le_connect_is_connected_as_slave()) {
-      PBL_LOG_DBG("Already connected as slave");
-      goto unlock;
-    }
-
     if (!bt_persistent_storage_has_active_ble_gateway_bonding() &&
         !bt_persistent_storage_has_ble_ancs_bonding()) {
       PBL_LOG_DBG("No bonded master device");
       goto unlock;
     }
 
+    if (gap_le_connect_is_connected_as_slave()) {
+      // E.g. the connected gateway was forgotten while another one is still bonded: its virtual
+      // disconnection comes before the link is down, so advertise once it is.
+      PBL_LOG_DBG("Already connected as slave");
+      s_is_basic_reconnection_pending = true;
+      goto unlock;
+    }
+
     prv_set_and_evaluate(&s_is_basic_reconnection_enabled, true);
   }
 unlock:
+  bt_unlock();
+}
+
+// -----------------------------------------------------------------------------
+void gap_le_slave_reconnect_handle_disconnect_as_slave(void) {
+  bt_lock();
+  {
+    if (s_is_basic_reconnection_pending) {
+      s_is_basic_reconnection_pending = false;
+      prv_set_and_evaluate(&s_is_basic_reconnection_enabled, true);
+    }
+  }
   bt_unlock();
 }
 
