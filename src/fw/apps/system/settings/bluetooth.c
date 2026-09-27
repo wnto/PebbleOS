@@ -223,15 +223,17 @@ static void prv_settings_bluetooth_event_handler(PebbleEvent *event, void *conte
       settings_bluetooth_update_remotes_private(settings_data);
       bool has_remotes = (settings_data->remote_list_head != NULL);
 
-      // Handle single phone pairing policy: enable/disable advertising based on pairing state
-      if (had_remotes && !has_remotes) {
+      // Handle single phone pairing policy: enable/disable advertising based on pairing state.
+      // With more pairings allowed, the menu stays pairable (see prv_expand_cb()).
+      const bool is_single_phone = (CONFIG_BT_MAX_BLE_PAIRINGS == 1);
+      if (is_single_phone && had_remotes && !has_remotes) {
         // Device was removed, enable advertising
         if (!settings_data->did_enable_pairability) {
           bt_pairability_use();
           settings_data->did_enable_pairability = true;
           PBL_LOG_INFO("Enabled advertising - no paired devices");
         }
-      } else if (!had_remotes && has_remotes) {
+      } else if (is_single_phone && !had_remotes && has_remotes) {
         // Device was added, disable advertising
         if (settings_data->did_enable_pairability) {
           bt_pairability_release();
@@ -379,7 +381,14 @@ static int16_t prv_get_row_base_height(SettingsBluetoothData *data, uint16_t row
 
 static const char *prv_get_hint(SettingsBluetoothData *data) {
   if (data->remote_list_head) {
-    return i18n_get("Forget this device to pair a new device.", data);
+    if (CONFIG_BT_MAX_BLE_PAIRINGS == 1) {
+      return i18n_get("Forget this device to pair a new device.", data);
+    }
+    // Connected phones are sorted first. Only one phone can be connected at a time.
+    if (is_remote_connected((StoredRemote *)data->remote_list_head)) {
+      return i18n_get("Turn off Bluetooth on the connected phone to pair another one.", data);
+    }
+    return i18n_get("Open the Pebble app on another phone to pair it.", data);
   }
   if (bt_ctl_is_airplane_mode_on()) {
     return i18n_get("Disable Airplane Mode to connect.", data);
@@ -555,9 +564,10 @@ static void prv_expand_cb(SettingsCallbacks *context) {
   event_service_client_subscribe(&data->bt_pairing_event_info);
   event_service_client_subscribe(&data->ble_device_name_updated_event_info);
 
-  // Only enable pairing/advertising if there are no paired devices (single phone policy)
+  // Only enable pairing/advertising if there are no paired devices (single phone policy), or if
+  // another phone can be paired
   data->did_enable_pairability = false;
-  if (!data->remote_list_head) {
+  if (CONFIG_BT_MAX_BLE_PAIRINGS > 1 || !data->remote_list_head) {
     bt_pairability_use();
     data->did_enable_pairability = true;
   }
