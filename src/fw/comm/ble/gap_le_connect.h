@@ -8,7 +8,8 @@
 #include "gap_le_task.h"
 #include "pbl/services/bluetooth/bluetooth_persistent_storage.h"
 
-#define GAP_LE_CONNECT_MASTER_MAX_CONNECTION_INTENTS (5)
+//! Every bonded gateway takes one, the rest is left for apps.
+#define GAP_LE_CONNECT_MASTER_MAX_CONNECTION_INTENTS (8)
 
 //! Internal extensions to the standard HCI status values (see HCITypes.h)
 typedef enum {

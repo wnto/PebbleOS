@@ -148,6 +148,16 @@ pbl_clar_test(test_kernel_le_client
     src/fw/comm/ble/kernel_le_client/kernel_le_client.c
     src/fw/util/rand/rand.c
     third_party/tinymt/TinyMT/tinymt/tinymt32.c
+  DEFINES CONFIG_BT_MAX_BLE_PAIRINGS=1
+)
+
+pbl_clar_test(test_kernel_le_client_multi
+  SOURCE test_kernel_le_client.c
+  SOURCES
+    src/fw/comm/ble/kernel_le_client/kernel_le_client.c
+    src/fw/util/rand/rand.c
+    third_party/tinymt/TinyMT/tinymt/tinymt32.c
+  DEFINES CONFIG_BT_MAX_BLE_PAIRINGS=2
 )
 
 pbl_clar_test(test_ppogatt_v0

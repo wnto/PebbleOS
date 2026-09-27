@@ -22,6 +22,7 @@
 #include <pbl/logging/logging.h>
 #include "system/passert.h"
 #include "pbl/kernel/compiler.h"
+#include "pbl/util/size.h"
 
 #include "comm/ble/gap_le_connect.h"
 #include "comm/ble/gap_le_slave_reconnect.h"
@@ -409,13 +410,20 @@ static void prv_handle_connection_event(const PebbleBLEConnectionEvent *event) {
   // https://pebbletechnology.atlassian.net/browse/PBL-15277
   //
   // For now, we just assume that the Kernel LE client is _always_ bonded for
-  // ANCS. Note that we cannot use bt_persistent_storage calls in this routine because
+  // ANCS. Note that we cannot use bt_persistent_storage calls on disconnection because
   // we could be getting this call as a result of a disconnect due to
   // forgetting a pairing key
 
   const struct pbl_bt_device_internal device = PebbleEventToBTDeviceInternal(event);
   if (connected) {
     PBL_LOG_DBG("Connected to Gateway!");
+
+    // With more than one pairing allowed, whichever bonded gateway connects becomes the active one.
+    // Switching gateways marks us as unfaithful, so the phone does a full sync. This has to happen
+    // before the phone gets to ask for our version.
+    if (CONFIG_BT_MAX_BLE_PAIRINGS > 1 && event->bonding_id != PBL_BT_BONDING_ID_INVALID) {
+      bt_persistent_storage_set_active_gateway(event->bonding_id);
+    }
 
 #if defined(CONFIG_BT_ANCS_CLIENT)
     ancs_create();
@@ -503,13 +511,33 @@ void kernel_le_client_handle_bonding_change(pbl_bt_bonding_id_t bonding, BtPersi
 }
 
 // -------------------------------------------------------------------------------------------------
+typedef struct {
+  pbl_bt_bonding_id_t ids[GAP_LE_CONNECT_MASTER_MAX_CONNECTION_INTENTS];
+  uint8_t count;
+} BondingIdsItrData;
+
+static void prv_collect_bonding_id_cb(struct pbl_bt_device_internal *device,
+                                      struct pbl_bt_sm_key *irk, const char *name,
+                                      pbl_bt_bonding_id_t *id, void *context) {
+  BondingIdsItrData *itr_data = context;
+  if (itr_data->count < ARRAY_LENGTH(itr_data->ids)) {
+    itr_data->ids[itr_data->count++] = *id;
+  }
+}
+
+// -------------------------------------------------------------------------------------------------
 void kernel_le_client_init(void) {
   // Reset analytics
   ppogatt_reset_disconnect_counter();
 
-  pbl_bt_bonding_id_t gateway_bonding = bt_persistent_storage_get_ble_ancs_bonding();
-  if (gateway_bonding != PBL_BT_BONDING_ID_INVALID) {
-    prv_connect_gateway_bonding(gateway_bonding);
+  // Any bonded gateway may be the one that reconnects. Collect the ids first: registering an
+  // intent reads the bonding DB, which can't be opened again while it's being iterated.
+  BondingIdsItrData itr_data = {};
+  bt_persistent_storage_for_each_ble_pairing(prv_collect_bonding_id_cb, &itr_data);
+  for (uint8_t i = 0; i < itr_data.count; i++) {
+    if (bt_persistent_storage_is_ble_ancs_bonding(itr_data.ids[i])) {
+      prv_connect_gateway_bonding(itr_data.ids[i]);
+    }
   }
 }
 
