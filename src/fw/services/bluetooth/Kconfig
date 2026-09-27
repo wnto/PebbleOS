@@ -23,6 +23,21 @@ config BLE_GATT_SUBSCRIPTION_DEPTH
       Per-client GATT subscription buffer depth, in max-size notifications.
       Deeper absorbs notification bursts (fewer drops) at the cost of RAM.
 
+config BT_MAX_BLE_PAIRINGS
+    int "Maximum number of paired phones"
+    range 1 2
+    default 1
+    help
+      How many phones the watch remembers at once. It is connected to one
+      of them at a time. With 1, pairing a phone replaces the previous one.
+      With 2, whichever bonded phone connects becomes the active gateway,
+      and pairing a third phone forgets the other, not the active gateway.
+
+      Every bonded phone takes an entry of the controller's resolving list,
+      and NimBLE uses one more for the local IRK. The SiFli SDK's default
+      configuration of the SF32LB52 controller has 3 entries, hence at
+      most 2.
+
 config BT_ANCS_CLIENT
     bool "ANCS (Apple Notification Center Service) client"
     default y if !RECOVERY_FW

@@ -127,6 +127,41 @@ void pbl_bt_handle_host_removed_cccd(const struct pbl_bt_cccd *cccd) {
 void sys_pbl_analytics_set_unsigned(enum pbl_analytics_key key, uint32_t unsigned_value) {
 }
 
+// Helpers
+///////////////////////////////////////////////////////////
+
+static struct pbl_bt_sm_pairing_info prv_pairing(uint8_t n) {
+  return (struct pbl_bt_sm_pairing_info){
+    .irk =
+        (struct pbl_bt_sm_key){
+          .data =
+              {n, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e,
+               0x0f, 0x00},
+        },
+    .identity =
+        (struct pbl_bt_device_internal){
+          .address =
+              (struct pbl_bt_addr){
+                .octets = {n, 0x12, 0x13, 0x14, 0x15, 0x16},
+              },
+        },
+    .is_remote_identity_info_valid = true,
+  };
+}
+
+static pbl_bt_bonding_id_t prv_store_gateway_pairing(uint8_t n) {
+  // Give every pairing its own timestamp, the oldest one gets evicted first
+  fake_rtc_increment_time(10);
+  const struct pbl_bt_sm_pairing_info pairing = prv_pairing(n);
+  return bt_persistent_storage_store_ble_pairing(
+      &pairing, true /* is_gateway */, NULL, false /* requires_address_pinning */, 0 /* flags */);
+}
+
+static bool prv_has_pairing(uint8_t n) {
+  const struct pbl_bt_sm_pairing_info pairing = prv_pairing(n);
+  return bt_persistent_storage_get_ble_pairing_by_addr(&pairing.identity, NULL, NULL);
+}
+
 // Tests
 ///////////////////////////////////////////////////////////
 
@@ -205,6 +240,11 @@ void test_bluetooth_persistent_storage__ble_address_pinning(void) {
 }
 
 void test_bluetooth_persistent_storage__ble_store_and_get(void) {
+  if (CONFIG_BT_MAX_BLE_PAIRINGS > 1) {
+    // Pairings replace each other only when a single one is allowed
+    return;
+  }
+
   bool ret;
 
   // Output variables
@@ -394,6 +434,118 @@ void test_bluetooth_persistent_storage__ble_store_and_get(void) {
   cl_assert_equal_b(bonding_sync_contains_pairing_info(&pairing_1, true), false);
   cl_assert_equal_b(bonding_sync_contains_pairing_info(&pairing_2, true), false);
   cl_assert_equal_b(bonding_sync_contains_pairing_info(&pairing_3, true), true);
+}
+
+void test_bluetooth_persistent_storage__new_pairing_replaces_active_gateway_if_single(void) {
+  if (CONFIG_BT_MAX_BLE_PAIRINGS > 1) {
+    return;
+  }
+
+  const pbl_bt_bonding_id_t id_1 = prv_store_gateway_pairing(1);
+  bt_persistent_storage_set_active_gateway(id_1);
+
+  cl_assert(prv_store_gateway_pairing(2) != PBL_BT_BONDING_ID_INVALID);
+  cl_assert(!prv_has_pairing(1));
+  cl_assert(prv_has_pairing(2));
+  // The active gateway went away with its bonding
+  cl_assert(!bt_persistent_storage_get_active_gateway(NULL, NULL));
+}
+
+void test_bluetooth_persistent_storage__multiple_pairings_coexist(void) {
+  if (CONFIG_BT_MAX_BLE_PAIRINGS == 1) {
+    return;
+  }
+
+  pbl_bt_bonding_id_t ids[CONFIG_BT_MAX_BLE_PAIRINGS];
+  for (int i = 0; i < CONFIG_BT_MAX_BLE_PAIRINGS; i++) {
+    ids[i] = prv_store_gateway_pairing(i + 1);
+    cl_assert(ids[i] != PBL_BT_BONDING_ID_INVALID);
+  }
+  cl_assert_equal_i(s_ble_bonding_change_add_count, CONFIG_BT_MAX_BLE_PAIRINGS);
+  cl_assert_equal_i(s_ble_bonding_change_delete_count, 0);
+
+  for (int i = 0; i < CONFIG_BT_MAX_BLE_PAIRINGS; i++) {
+    cl_assert(prv_has_pairing(i + 1));
+    // Every one of them is a gateway the watch connects to
+    cl_assert(bt_persistent_storage_is_ble_ancs_bonding(ids[i]));
+  }
+
+  // They survive a reboot and all get handed to the BT driver
+  bt_persistent_storage_init();
+  bt_persistent_storage_register_existing_ble_bondings();
+  for (int i = 0; i < CONFIG_BT_MAX_BLE_PAIRINGS; i++) {
+    const struct pbl_bt_sm_pairing_info pairing = prv_pairing(i + 1);
+    cl_assert(prv_has_pairing(i + 1));
+    cl_assert(bonding_sync_contains_pairing_info(&pairing, true));
+  }
+  cl_assert_equal_i(s_ble_bonding_change_delete_count, 0);
+}
+
+void test_bluetooth_persistent_storage__pairing_beyond_limit_evicts_oldest(void) {
+  if (CONFIG_BT_MAX_BLE_PAIRINGS == 1) {
+    return;
+  }
+
+  for (int i = 0; i < CONFIG_BT_MAX_BLE_PAIRINGS; i++) {
+    prv_store_gateway_pairing(i + 1);
+  }
+
+  cl_assert(prv_store_gateway_pairing(CONFIG_BT_MAX_BLE_PAIRINGS + 1) != PBL_BT_BONDING_ID_INVALID);
+  cl_assert_equal_i(s_ble_bonding_change_delete_count, 1);
+  cl_assert(!prv_has_pairing(1));
+  for (int i = 1; i <= CONFIG_BT_MAX_BLE_PAIRINGS; i++) {
+    cl_assert(prv_has_pairing(i + 1));
+  }
+}
+
+void test_bluetooth_persistent_storage__active_gateway_is_not_evicted(void) {
+  if (CONFIG_BT_MAX_BLE_PAIRINGS == 1) {
+    return;
+  }
+
+  const pbl_bt_bonding_id_t oldest_id = prv_store_gateway_pairing(1);
+  for (int i = 1; i < CONFIG_BT_MAX_BLE_PAIRINGS; i++) {
+    prv_store_gateway_pairing(i + 1);
+  }
+  bt_persistent_storage_set_active_gateway(oldest_id);
+
+  // The next oldest one goes instead
+  prv_store_gateway_pairing(CONFIG_BT_MAX_BLE_PAIRINGS + 1);
+  cl_assert_equal_i(s_ble_bonding_change_delete_count, 1);
+  cl_assert(prv_has_pairing(1));
+  cl_assert(!prv_has_pairing(2));
+
+  pbl_bt_bonding_id_t active_gateway;
+  cl_assert(bt_persistent_storage_get_active_gateway(&active_gateway, NULL));
+  cl_assert_equal_i(active_gateway, oldest_id);
+}
+
+void test_bluetooth_persistent_storage__active_gateway_change_marks_unfaithful(void) {
+  const pbl_bt_bonding_id_t id_1 = prv_store_gateway_pairing(1);
+  bt_persistent_storage_set_unfaithful(false);
+
+  bt_persistent_storage_set_active_gateway(id_1);
+  cl_assert(bt_persistent_storage_is_unfaithful());
+  bt_persistent_storage_set_unfaithful(false);
+
+  // The same gateway reconnecting still has all the data
+  bt_persistent_storage_set_active_gateway(id_1);
+  cl_assert(!bt_persistent_storage_is_unfaithful());
+
+  if (CONFIG_BT_MAX_BLE_PAIRINGS > 1) {
+    const pbl_bt_bonding_id_t id_2 = prv_store_gateway_pairing(2);
+    bt_persistent_storage_set_active_gateway(id_1);
+    bt_persistent_storage_set_unfaithful(false);
+
+    // Switching to the other gateway needs a full sync
+    bt_persistent_storage_set_active_gateway(id_2);
+    cl_assert(bt_persistent_storage_is_unfaithful());
+    bt_persistent_storage_set_unfaithful(false);
+
+    // And so does switching back
+    bt_persistent_storage_set_active_gateway(id_1);
+    cl_assert(bt_persistent_storage_is_unfaithful());
+  }
 }
 
 void test_bluetooth_persistent_storage__get_ble_by_addr(void) {

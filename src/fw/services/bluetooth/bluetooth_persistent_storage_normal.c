@@ -575,28 +575,17 @@ static pbl_bt_bonding_id_t prv_get_key_for_sm_pairing_info(
 
 static bool prv_delete_ble_pairing_by_id(pbl_bt_bonding_id_t bonding);
 
-//! Only a single BLE pairing is supported at a time. The buffer below is sized generously to absorb
-//! any legacy state where the bonding DB ended up with multiple entries (e.g. after a PRF pairing
-//! was merged on top of an existing normal-FW pairing).
-#define BT_BONDING_PRUNE_MAX 8
-
 typedef struct {
   pbl_bt_bonding_id_t keep_id;
-  pbl_bt_bonding_id_t ids[BT_BONDING_PRUNE_MAX];
-  uint8_t count;
-} CollectOtherBleItrData;
+  pbl_bt_bonding_id_t active_gateway_id;
+  pbl_bt_bonding_id_t oldest_id;
+  uint32_t oldest_last_modified;
+  uint8_t ble_count;
+} FindEvictableBleItrData;
 
-static bool prv_collect_other_ble_bondings_itr(SettingsFile *file, SettingsRecordInfo *info,
+static bool prv_find_evictable_ble_bonding_itr(SettingsFile *file, SettingsRecordInfo *info,
                                                void *context) {
   if (info->val_len == 0 || info->key_len != sizeof(pbl_bt_bonding_id_t)) {
-    return true;
-  }
-
-  CollectOtherBleItrData *itr_data = context;
-
-  pbl_bt_bonding_id_t key;
-  info->get_key(file, (uint8_t *)&key, info->key_len);
-  if (key == itr_data->keep_id) {
     return true;
   }
 
@@ -606,28 +595,53 @@ static bool prv_collect_other_ble_bondings_itr(SettingsFile *file, SettingsRecor
     return true;
   }
 
-  if (itr_data->count < BT_BONDING_PRUNE_MAX) {
-    itr_data->ids[itr_data->count++] = key;
+  FindEvictableBleItrData *itr_data = context;
+  itr_data->ble_count++;
+
+  pbl_bt_bonding_id_t key;
+  info->get_key(file, (uint8_t *)&key, info->key_len);
+  if (key == itr_data->keep_id || key == itr_data->active_gateway_id) {
+    return true;
+  }
+
+  if (itr_data->oldest_id == PBL_BT_BONDING_ID_INVALID ||
+      info->last_modified < itr_data->oldest_last_modified) {
+    itr_data->oldest_id = key;
+    itr_data->oldest_last_modified = info->last_modified;
   }
   return true;
 }
 
-//! Delete every BLE bonding except `keep_id`. We only ever support one BLE pairing at a time, so
-//! any other BLE bonding present is stale and must be removed (e.g. when a new phone pairs and
-//! replaces the previous one).
+//! Delete the least recently modified BLE bondings until at most CONFIG_BT_MAX_BLE_PAIRINGS are
+//! left. `keep_id` is never deleted, and neither is the active gateway unless only one pairing is
+//! allowed (then a new phone replaces the previous one).
 //!
 //! Uses the internal delete helper that does not erase shared PRF pairing data, since the kept
 //! entry is the one that should remain reflected in PRF storage.
-static void prv_delete_other_ble_bondings(pbl_bt_bonding_id_t keep_id) {
-  CollectOtherBleItrData itr_data = {
-    .keep_id = keep_id,
-    .count = 0,
-  };
-  prv_file_each(prv_collect_other_ble_bondings_itr, &itr_data);
+static void prv_enforce_max_ble_bondings(pbl_bt_bonding_id_t keep_id) {
+  pbl_bt_bonding_id_t active_gateway_id = PBL_BT_BONDING_ID_INVALID;
+  if (CONFIG_BT_MAX_BLE_PAIRINGS > 1) {
+    bt_persistent_storage_get_active_gateway(&active_gateway_id, NULL);
+  }
 
-  for (uint8_t i = 0; i < itr_data.count; i++) {
-    PBL_LOG_INFO("Removing stale BLE bonding %d (kept %d)", itr_data.ids[i], keep_id);
-    prv_delete_ble_pairing_by_id(itr_data.ids[i]);
+  while (true) {
+    FindEvictableBleItrData itr_data = {
+      .keep_id = keep_id,
+      .active_gateway_id = active_gateway_id,
+      .oldest_id = PBL_BT_BONDING_ID_INVALID,
+    };
+    prv_file_each(prv_find_evictable_ble_bonding_itr, &itr_data);
+
+    if (itr_data.ble_count <= CONFIG_BT_MAX_BLE_PAIRINGS ||
+        itr_data.oldest_id == PBL_BT_BONDING_ID_INVALID) {
+      return;
+    }
+
+    PBL_LOG_INFO("Removing BLE bonding %d, over the limit of %d (kept %d)", itr_data.oldest_id,
+                 CONFIG_BT_MAX_BLE_PAIRINGS, keep_id);
+    if (!prv_delete_ble_pairing_by_id(itr_data.oldest_id)) {
+      return;
+    }
   }
 }
 
@@ -663,9 +677,9 @@ static bool prv_find_most_recent_ble_bonding_itr(SettingsFile *file, SettingsRec
   return true;
 }
 
-//! If the bonding DB contains multiple BLE pairings (e.g. left over from an older firmware that
-//! allowed more than one, or from a PRF pairing merged on top of an existing one), keep the most
-//! recently modified entry and drop the rest.
+//! If the bonding DB contains more BLE pairings than allowed (e.g. left over from a firmware that
+//! allowed more, or from a PRF pairing merged on top of existing ones), keep the most recently
+//! modified entries and drop the rest.
 static void prv_prune_stale_ble_bondings(void) {
   MostRecentBleItrData itr_data = {
     .key_out = PBL_BT_BONDING_ID_INVALID,
@@ -674,13 +688,14 @@ static void prv_prune_stale_ble_bondings(void) {
   };
   prv_file_each(prv_find_most_recent_ble_bonding_itr, &itr_data);
 
-  if (itr_data.ble_count <= 1 || itr_data.key_out == PBL_BT_BONDING_ID_INVALID) {
+  if (itr_data.ble_count <= CONFIG_BT_MAX_BLE_PAIRINGS ||
+      itr_data.key_out == PBL_BT_BONDING_ID_INVALID) {
     return;
   }
 
   PBL_LOG_INFO("Found %u BLE bondings at boot, keeping most recent (id %d)", itr_data.ble_count,
                itr_data.key_out);
-  prv_delete_other_ble_bondings(itr_data.key_out);
+  prv_enforce_max_ble_bondings(itr_data.key_out);
 }
 
 //! For unit testing
@@ -755,18 +770,17 @@ pbl_bt_bonding_id_t bt_persistent_storage_store_ble_pairing(
     prv_update_bondings(key, BtPersistBondingTypeBLE);
   }
 
-  // In practice we only support a single BLE pairing at a time, so if we add a new one,
-  // set ourselves as unfaithful.
+  // A new pairing has none of our data yet, set ourselves as unfaithful so it syncs everything.
   if (op == BtPersistBondingOpDidAdd) {
     bt_persistent_storage_set_unfaithful(true);
   }
 
   prv_call_ble_bonding_change_handlers(key, op);
 
-  // We only support a single BLE pairing at a time. Drop any previous BLE bonding so that
-  // re-pairing with a different phone (or merging a PRF pairing) replaces the old one instead of
-  // leaving it behind and forcing the user to forget it manually.
-  prv_delete_other_ble_bondings(key);
+  // Stay within the pairing limit. With a single pairing, re-pairing with a different phone (or
+  // merging a PRF pairing) replaces the old one instead of leaving it behind and forcing the user
+  // to forget it manually.
+  prv_enforce_max_ble_bondings(key);
 
   return key;
 }
@@ -1448,8 +1462,8 @@ void bt_persistent_storage_init(void) {
 
   prv_load_data_from_prf();
 
-  // Clean up any leftover state where the bonding DB ended up with more than one BLE pairing
-  // (e.g. inherited from an older firmware build, or a PRF pairing layered on an existing one).
+  // Clean up any leftover state where the bonding DB ended up with more BLE pairings than allowed
+  // (e.g. inherited from another firmware build, or a PRF pairing layered on existing ones).
   prv_prune_stale_ble_bondings();
 
   // Load cached capability bits from flash
