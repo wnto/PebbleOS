@@ -9,6 +9,7 @@
 #include "gap_le_advert.h"
 #include "gap_le_connect_params.h"
 #include "gap_le_connection.h"
+#include "gap_le_slave_reconnect.h"
 #include "gap_le_task.h"
 #include "kernel/events.h"
 #include "kernel/pbl_malloc.h"
@@ -513,6 +514,7 @@ void pbl_bt_handle_le_disconnection_complete_event(
       if (!local_is_master) {
         s_is_connected_as_slave = false;
         gap_le_advert_handle_disconnect_as_slave();
+        gap_le_slave_reconnect_handle_disconnect_as_slave();
 
         prv_put_legacy_connection_event(&event->peer_address, false /* disconnected */);
       }

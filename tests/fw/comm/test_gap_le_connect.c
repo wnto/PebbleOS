@@ -63,6 +63,9 @@ const GAP_LE_Pairing_Capabilities_t *gap_le_pairing_capabilities(void) {
 void gap_le_device_name_request(uintptr_t stack_id, GAPLEConnection *connection) {
 }
 
+void gap_le_slave_reconnect_handle_disconnect_as_slave(void) {
+}
+
 void gatt_service_changed_server_cleanup_by_connection(GAPLEConnection *connection) {
 }
 

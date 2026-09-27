@@ -20,7 +20,11 @@ void gap_le_slave_reconnect_stop(void);
 //! - When a connection to a master is lost
 //! - When the list of bonded devices changes
 //! - When Bluetooth is turned on
+//! When still connected as slave, advertising starts once that connection is gone.
 void gap_le_slave_reconnect_start(void);
+
+//! To be called when the connection as slave is gone.
+void gap_le_slave_reconnect_handle_disconnect_as_slave(void);
 
 #ifdef CONFIG_HRM
 
