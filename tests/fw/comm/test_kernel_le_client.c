@@ -36,12 +36,23 @@ void ancs_destroy(void) {
 void app_launch_handle_disconnection(void) {
 }
 
-pbl_bt_bonding_id_t bt_persistent_storage_get_ble_ancs_bonding(void) {
-  return 1;
+// Bondings 1 and 3 are gateways, 2 is not.
+static const pbl_bt_bonding_id_t s_bonding_ids[] = {1, 2, 3};
+
+void bt_persistent_storage_for_each_ble_pairing(BtPersistBondingDBEachBLE cb, void *context) {
+  for (size_t i = 0; i < ARRAY_LENGTH(s_bonding_ids); i++) {
+    pbl_bt_bonding_id_t id = s_bonding_ids[i];
+    cb(NULL, NULL, NULL, &id, context);
+  }
 }
 
 bool bt_persistent_storage_is_ble_ancs_bonding(pbl_bt_bonding_id_t bonding) {
-  return true;
+  return (bonding != 2);
+}
+
+static pbl_bt_bonding_id_t s_active_gateway;
+void bt_persistent_storage_set_active_gateway(pbl_bt_bonding_id_t bonding) {
+  s_active_gateway = bonding;
 }
 
 void gap_le_advert_unschedule_job_types(GAPLEAdvertisingJobTag *tag_types, size_t num_types) {
@@ -55,9 +66,13 @@ enum pbl_bt_errno gap_le_connect_cancel_by_bonding(pbl_bt_bonding_id_t bonding_i
   return PBL_BT_ERRNO_OK;
 }
 
+static pbl_bt_bonding_id_t s_connected_bondings[4];
+static int s_connected_bondings_count;
 enum pbl_bt_errno gap_le_connect_connect_by_bonding(pbl_bt_bonding_id_t bonding_id,
                                                     bool auto_reconnect, bool is_pairing_required,
                                                     GAPLEClient client) {
+  cl_assert(s_connected_bondings_count < (int)ARRAY_LENGTH(s_connected_bondings));
+  s_connected_bondings[s_connected_bondings_count++] = bonding_id;
   return PBL_BT_ERRNO_OK;
 }
 
@@ -208,6 +223,8 @@ void test_kernel_le_client__initialize(void) {
   s_services_discovered_count = 0;
   s_read_responses_consumed_count = 0;
   s_can_handle_characteristic = false;
+  s_connected_bondings_count = 0;
+  s_active_gateway = PBL_BT_BONDING_ID_INVALID;
   kernel_le_client_init();
 }
 
@@ -270,6 +287,71 @@ void test_kernel_le_client__service_added(void) {
   cl_assert_equal_i(s_services_discovered_count, 1);
 
   kernel_free(info);
+}
+
+void test_kernel_le_client__init_connects_every_gateway_bonding(void) {
+  cl_assert_equal_i(s_connected_bondings_count, 2);
+  cl_assert_equal_i(s_connected_bondings[0], 1);
+  cl_assert_equal_i(s_connected_bondings[1], 3);
+}
+
+void test_kernel_le_client__connected_gateway_becomes_active(void) {
+  if (CONFIG_BT_MAX_BLE_PAIRINGS == 1) {
+    return;
+  }
+
+  PebbleEvent e = (PebbleEvent){
+    .type = PEBBLE_BLE_CONNECTION_EVENT,
+    .bluetooth.le.connection = {
+      .connected = true,
+      .bonding_id = 3,
+    },
+  };
+  kernel_le_client_handle_event(&e);
+  cl_assert_equal_i(s_active_gateway, 3);
+
+  // Disconnecting doesn't touch the active gateway:
+  e.bluetooth.le.connection.connected = false;
+  kernel_le_client_handle_event(&e);
+  cl_assert_equal_i(s_active_gateway, 3);
+
+  e.bluetooth.le.connection.connected = true;
+  e.bluetooth.le.connection.bonding_id = 1;
+  kernel_le_client_handle_event(&e);
+  cl_assert_equal_i(s_active_gateway, 1);
+}
+
+void test_kernel_le_client__connection_without_bonding_keeps_active_gateway(void) {
+  if (CONFIG_BT_MAX_BLE_PAIRINGS == 1) {
+    return;
+  }
+
+  s_active_gateway = 1;
+  PebbleEvent e = (PebbleEvent){
+    .type = PEBBLE_BLE_CONNECTION_EVENT,
+    .bluetooth.le.connection = {
+      .connected = true,
+      .bonding_id = PBL_BT_BONDING_ID_INVALID,
+    },
+  };
+  kernel_le_client_handle_event(&e);
+  cl_assert_equal_i(s_active_gateway, 1);
+}
+
+void test_kernel_le_client__single_pairing_does_not_track_active_gateway(void) {
+  if (CONFIG_BT_MAX_BLE_PAIRINGS > 1) {
+    return;
+  }
+
+  PebbleEvent e = (PebbleEvent){
+    .type = PEBBLE_BLE_CONNECTION_EVENT,
+    .bluetooth.le.connection = {
+      .connected = true,
+      .bonding_id = 3,
+    },
+  };
+  kernel_le_client_handle_event(&e);
+  cl_assert_equal_i(s_active_gateway, PBL_BT_BONDING_ID_INVALID);
 }
 
 // FIXME: PBL-27751: Improve test coverage of kernel_le_client.c
