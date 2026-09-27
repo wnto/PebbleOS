@@ -220,15 +220,17 @@ static void prv_settings_bluetooth_event_handler(PebbleEvent *event, void *conte
       settings_bluetooth_update_remotes_private(settings_data);
       bool has_remotes = (settings_data->remote_list_head != NULL);
 
-      // Handle single phone pairing policy: enable/disable advertising based on pairing state
-      if (had_remotes && !has_remotes) {
+      // Handle single phone pairing policy: enable/disable advertising based on pairing state.
+      // With more pairings allowed, the menu stays pairable (see prv_expand_cb()).
+      const bool is_single_phone = (CONFIG_BT_MAX_BLE_PAIRINGS == 1);
+      if (is_single_phone && had_remotes && !has_remotes) {
         // Device was removed, enable advertising
         if (!settings_data->did_enable_pairability) {
           bt_pairability_use();
           settings_data->did_enable_pairability = true;
           PBL_LOG_INFO("Enabled advertising - no paired devices");
         }
-      } else if (!had_remotes && has_remotes) {
+      } else if (is_single_phone && !had_remotes && has_remotes) {
         // Device was added, disable advertising
         if (settings_data->did_enable_pairability) {
           bt_pairability_release();
@@ -440,14 +442,24 @@ static void prv_draw_row_cb(SettingsCallbacks *context, GContext *ctx, const Lay
                            font, box, GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter,
                            NULL);
       }
-    } else {
+    } else if (CONFIG_BT_MAX_BLE_PAIRINGS == 1 || list_count(data->remote_list_head) == 1) {
       // Show message when any phone is paired (even if disconnected)
-      // Position the message lower to appear below the paired phone row
+      // Position the message lower to appear below the paired phone row. It would overlap the
+      // rows of any further phones, so it's only shown for one.
+      const char *hint;
+      if (CONFIG_BT_MAX_BLE_PAIRINGS == 1) {
+        hint = i18n_get("Forget this device to pair a new device.", data);
+      } else if (is_remote_connected((StoredRemote *)data->remote_list_head)) {
+        // Only one phone can be connected at a time
+        hint = i18n_get("Turn off Bluetooth on the connected phone to pair another one.", data);
+      } else {
+        hint = i18n_get("Open the Pebble app on another phone to pair it.", data);
+      }
       GRect msg_box = box;
       msg_box.origin.y += menu_cell_basic_cell_height() - 10;
       msg_box.size.h -= menu_cell_basic_cell_height() - 10;
-      graphics_draw_text(ctx, i18n_get("Forget this device to pair a new device.", data), font,
-                         msg_box, GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
+      graphics_draw_text(ctx, hint, font, msg_box, GTextOverflowModeTrailingEllipsis,
+                         GTextAlignmentCenter, NULL);
     }
 
     ctx->draw_state = draw_state;
@@ -522,9 +534,10 @@ static void prv_expand_cb(SettingsCallbacks *context) {
   event_service_client_subscribe(&data->bt_pairing_event_info);
   event_service_client_subscribe(&data->ble_device_name_updated_event_info);
 
-  // Only enable pairing/advertising if there are no paired devices (single phone policy)
+  // Only enable pairing/advertising if there are no paired devices (single phone policy), or if
+  // another phone can be paired
   data->did_enable_pairability = false;
-  if (!data->remote_list_head) {
+  if (CONFIG_BT_MAX_BLE_PAIRINGS > 1 || !data->remote_list_head) {
     bt_pairability_use();
     data->did_enable_pairability = true;
   }
