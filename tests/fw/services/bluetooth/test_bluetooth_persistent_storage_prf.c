@@ -367,3 +367,41 @@ void test_bluetooth_persistent_storage_prf__delete_ble_pairing_by_id(void) {
                                                false /* auto_accept_re_pairing */);
   cl_assert(id != PBL_BT_BONDING_ID_INVALID);
 }
+
+static void prv_count_pairings_cb(struct pbl_bt_device_internal *device, struct pbl_bt_sm_key *irk,
+                                  const char *name, pbl_bt_bonding_id_t *id, void *context) {
+  pbl_bt_bonding_id_t *found_id = context;
+  cl_assert_equal_i(*found_id, PBL_BT_BONDING_ID_INVALID);
+  *found_id = *id;
+}
+
+void test_bluetooth_persistent_storage_prf__for_each_ble_pairing(void) {
+  pbl_bt_bonding_id_t found_id = PBL_BT_BONDING_ID_INVALID;
+  bt_persistent_storage_for_each_ble_pairing(prv_count_pairings_cb, &found_id);
+  cl_assert_equal_i(found_id, PBL_BT_BONDING_ID_INVALID);
+
+  struct pbl_bt_sm_pairing_info pairing = (struct pbl_bt_sm_pairing_info){
+    .irk =
+        (struct pbl_bt_sm_key){
+          .data =
+              {0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e,
+               0x0f, 0x00},
+        },
+    .identity =
+        (struct pbl_bt_device_internal){
+          .address =
+              (struct pbl_bt_addr){
+                .octets = {0x11, 0x12, 0x13, 0x14, 0x15, 0x16},
+              },
+        },
+    .is_remote_identity_info_valid = true,
+  };
+  const pbl_bt_bonding_id_t id = bt_persistent_storage_store_ble_pairing(
+      &pairing, true /* is_gateway */, NULL, false /* requires_address_pinning */, 0 /* flags */);
+  cl_assert(id != PBL_BT_BONDING_ID_INVALID);
+
+  // The one pairing PRF has is reported, so the kernel LE client connects to it
+  bt_persistent_storage_for_each_ble_pairing(prv_count_pairings_cb, &found_id);
+  cl_assert_equal_i(found_id, id);
+  cl_assert(bt_persistent_storage_is_ble_ancs_bonding(found_id));
+}

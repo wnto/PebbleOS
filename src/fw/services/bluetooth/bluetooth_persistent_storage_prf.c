@@ -203,7 +203,14 @@ bool bt_persistent_storage_has_active_ble_gateway_bonding(void) {
 }
 
 void bt_persistent_storage_for_each_ble_pairing(BtPersistBondingDBEachBLE cb, void *context) {
-  return;
+  struct pbl_bt_sm_key irk;
+  struct pbl_bt_device_internal device;
+  char name[PBL_BT_DEVICE_NAME_BUFFER_SIZE];
+  if (!bt_persistent_storage_get_ble_pairing_by_id(BLE_BONDING_ID, &irk, &device, name)) {
+    return;
+  }
+  pbl_bt_bonding_id_t id = BLE_BONDING_ID;
+  cb(&device, &irk, name, &id, context);
 }
 
 void bt_persistent_storage_register_existing_ble_bondings(void) {
